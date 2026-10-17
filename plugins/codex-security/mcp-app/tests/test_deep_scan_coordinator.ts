@@ -4003,7 +4003,7 @@ async function testPolicyRefusedReducerPreservesCommittedAggregate() {
     workers: 2,
     stopAfterNoNew: 10,
     stopAfterConsecutiveErrors: 2,
-    maxDiscoveryRuns: 4,
+    maxDiscoveryRuns: 3,
   });
   const refusalMessage =
     "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
@@ -4012,7 +4012,6 @@ async function testPolicyRefusedReducerPreservesCommittedAggregate() {
     discoveryCandidateId: "candidate-1",
     canonicalCandidateId: "candidate-1",
     discoveryGates: { "discovery-0003": nextDiscovery.promise },
-    blockDiscoveryAfterCalls: 3,
   });
   const failedAttempts: (string | undefined)[] = [];
   const preserved: ScanDraftInput[] = [];
