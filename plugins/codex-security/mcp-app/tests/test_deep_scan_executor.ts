@@ -57,7 +57,6 @@ const {
   classifyCodexWorkerError,
   codexWorkerTurnError,
   DeepScanNonRetryableError,
-  isCodexCybersecurityPolicyRefusal,
   parseDeepScan,
 } = await importModule({
   define: {
@@ -154,7 +153,7 @@ try {
     await testAbortPropagation();
     await testUnstructuredConfigurationFailureRemainsRetryable();
     await testUnstructuredThreadStartFailureRemainsRetryable();
-    await testPolicyFailuresRemainWorkerErrors();
+    await testPolicyFailuresAreNonRetryable();
     await testMalformedCommandEventsRemainRetryable();
     await testRateLimitPolicyFailureRemainsRetryable();
     await testArtifactStartupTimeoutClassification();
@@ -276,7 +275,9 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
     const classified = classifyCodexWorkerError(original);
     assert.equal(classified, original);
     assert.equal(classified.name, "Error");
-    assert.equal(isCodexCybersecurityPolicyRefusal(classified), true);
+    const turnError = codexWorkerTurnError(message);
+    assert.ok(turnError instanceof DeepScanNonRetryableError);
+    assert.equal(turnError.message, message);
 
     const explicitRefusal = new DeepScanNonRetryableError(message);
     assert.equal(classifyCodexWorkerError(explicitRefusal), explicitRefusal);
@@ -293,7 +294,7 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
     ]) {
       const unrelated = new Error(unrecognized);
       assert.equal(classifyCodexWorkerError(unrelated), unrelated);
-      assert.equal(isCodexCybersecurityPolicyRefusal(unrelated), false);
+      assert.equal(codexWorkerTurnError(unrecognized).name, "Error");
     }
   }
 
@@ -3545,7 +3546,7 @@ async function testUnstructuredThreadStartFailureRemainsRetryable() {
   );
 }
 
-async function testPolicyFailuresRemainWorkerErrors() {
+async function testPolicyFailuresAreNonRetryable() {
   for (const prompt of [
     "CYBER_POLICY_ERROR",
     "SAFETY_POLICY_ERROR",
@@ -3558,7 +3559,7 @@ async function testPolicyFailuresRemainWorkerErrors() {
     await assert.rejects(
       runFixtureWorker(prompt),
       (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "Error" && isCodexCybersecurityPolicyRefusal(error),
+        error instanceof DeepScanNonRetryableError,
     );
   }
 }
@@ -4087,14 +4088,26 @@ async function testWorkerTerminalEvents() {
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const quotaMessage = "Quota exceeded. Check your plan and billing details.";
+    const refusalMessage =
+      "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
+      { type: "turn.failed", error: { message: refusalMessage } },
       { type: "turn.failed", error: { message: "429 Too Many Requests" } },
       { type: "error", message: quotaMessage },
+      { type: "error", message: refusalMessage },
       {
         type: "item.completed",
         item: { id: "quota-text", type: "agent_message", text: quotaMessage },
+      },
+      {
+        type: "item.completed",
+        item: {
+          id: "refusal-text",
+          type: "agent_message",
+          text: refusalMessage,
+        },
       },
     ] as const) {
       await writeFile(
@@ -4103,7 +4116,7 @@ async function testWorkerTerminalEvents() {
           ? `IPC_DIAGNOSTIC_EVENT\n${JSON.stringify(event)}\n`
           : "NULL_USAGE\n",
       );
-      for (const kind of ["discovery", "dedup"] as const) {
+      for (const kind of ["setup", "discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           const onNonRetryableError = mock.fn();
           const execution = new CodexSdkWorkerExecutor({
@@ -4118,16 +4131,17 @@ async function testWorkerTerminalEvents() {
             onNonRetryableError,
           });
           if (event?.type === "turn.failed") {
-            const isQuota = event.error.message === quotaMessage;
+            const nonRetryable =
+              event.error.message !== "429 Too Many Requests";
             await assert.rejects(execution, {
-              name: isQuota ? "DeepScanNonRetryableError" : "Error",
+              name: nonRetryable ? "DeepScanNonRetryableError" : "Error",
               message: event.error.message,
             });
             assert.deepEqual(
               onNonRetryableError.mock.calls.map(
                 ({ arguments: [error] }) => error.message,
               ),
-              isQuota ? [quotaMessage] : [],
+              nonRetryable ? [event.error.message] : [],
             );
             continue;
           }
