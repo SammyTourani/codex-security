@@ -50,6 +50,7 @@ import {
   initialCredentialsAvailable,
 } from "../src/api.js";
 import {
+  CHEAPERINFERENCE_CODEX_PROVIDER,
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
@@ -320,6 +321,13 @@ const EXTERNAL_PROVIDER_CASES = [
     "FIREWORKS_API_KEY",
     "accounts/fireworks/models/qwen3-235b-a22b",
     FIREWORKS_CODEX_PROVIDER,
+  ],
+  [
+    "Cheaper Inference",
+    "cheaperinference",
+    "CHEAPER_INFERENCE_API_KEY",
+    "gpt-5.4",
+    CHEAPERINFERENCE_CODEX_PROVIDER,
   ],
 ] as const;
 const BEDROCK_AUTHENTICATION_CASES = [
@@ -990,9 +998,9 @@ describe("CodexSecurity orchestration", () => {
   );
 
   test.each([
-    ["root configuration", { approval_policy: "never" }],
+    ["root configuration", { approval_policy: "never" }, "never"],
     [
-      "selected profile",
+      "selected never profile",
       {
         approval_policy: "on-request",
         profile: "strict",
@@ -1000,10 +1008,22 @@ describe("CodexSecurity orchestration", () => {
           strict: { approval_policy: "never", model: "profile-model" },
         },
       },
+      "never",
+    ],
+    [
+      "selected on-request profile",
+      {
+        approval_policy: "never",
+        profile: "review",
+        profiles: {
+          review: { approval_policy: "on-request", model: "profile-model" },
+        },
+      },
+      "on-request",
     ],
   ] as const)(
-    "preserves strict approvals from %s in scan threads and saved recipes",
-    async (_source, codexOverrides) => {
+    "preserves approvals from %s in scan threads and saved recipes",
+    async (_source, codexOverrides, approvalPolicy) => {
       const { root, repository, codexHome } = await runtimeDirectories();
       let threadOptions: Record<string, unknown> | undefined;
       let recipe: Record<string, unknown> | undefined;
@@ -1023,8 +1043,11 @@ describe("CodexSecurity orchestration", () => {
             }
             return mockWorkbench(args, input);
           },
-          createCodex: () => ({
+          createCodex: (codexOptions) => ({
             startThread: (options: Record<string, unknown>) => {
+              expect(codexOptions.config).toMatchObject({
+                approval_policy: approvalPolicy,
+              });
               threadOptions = options;
               return {
                 id: null,
@@ -1038,9 +1061,9 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, { outputDir: join(root, "scan") }),
       ).rejects.toThrow("scan approval policy captured");
-      expect(threadOptions).toMatchObject({ approvalPolicy: "never" });
+      expect(threadOptions).toMatchObject({ approvalPolicy });
       expect(recipe).toMatchObject({
-        config: { approval_policy: "never" },
+        config: { approval_policy: approvalPolicy },
       });
       await client.close();
     },
