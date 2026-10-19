@@ -96,6 +96,8 @@ const emptyWorkerPermissionProfile = {
   filesystem: { ":root": "read" },
   network: { enabled: false },
 };
+const cybersecurityRefusal =
+  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
 const ipcFrameError =
   "code-mode delegate response exceeds the IPC frame limit: code-mode IPC frame length 76008279 exceeds 67108864 bytes";
 const deniedWorkerPermissionProfile = {
@@ -150,9 +152,7 @@ try {
     }
     await testCodeModeFrameDiagnosticSurvivesSuccessfulTurn();
     await testStreamTerminationWithoutTerminalEventFails();
-    await testAbortPropagation();
-    await testUnstructuredConfigurationFailureRemainsRetryable();
-    await testUnstructuredThreadStartFailureRemainsRetryable();
+    await testUnstructuredStartupFailuresRemainRetryable();
     await testPolicyFailuresAreNonRetryable();
     await testMalformedCommandEventsRemainRetryable();
     await testRateLimitPolicyFailureRemainsRetryable();
@@ -261,16 +261,16 @@ function testWorkerErrorClassificationPreservesExplicitFailures() {
   );
   assert.equal(classifyCodexWorkerError(explicit), explicit);
 
-  const refusalMessages = [
+  const cybersecurityRefusals = [
     "Request blocked by cyberPolicy.",
     "Request blocked by a safety policy violation.",
     "This content was flagged for possible cybersecurity risk.",
-    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
+    cybersecurityRefusal,
     "This content was flagged for potentially high-risk cyber activity.",
     "This request has been flagged for possible cybersecurity risk.",
     "This request has been flagged for potentially high-risk cyber activity.",
   ];
-  for (const message of refusalMessages) {
+  for (const message of cybersecurityRefusals) {
     const original = new Error(message);
     const classified = classifyCodexWorkerError(original);
     assert.equal(classified, original);
@@ -3375,29 +3375,6 @@ async function testStreamTerminationWithoutTerminalEventFails() {
   );
 }
 
-async function testAbortPropagation() {
-  return withWorkerFixture(async (fixture, promptPath, workingDirectory) => {
-    await writeFile(promptPath, "BLOCK_AFTER_START\n");
-    const abortController = new AbortController();
-    const execution = new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-    }).run({
-      kind: "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 0,
-      signal: abortController.signal,
-      onThreadStarted: () => abortController.abort("fixture cancellation"),
-    });
-    await assert.rejects(
-      execution,
-      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-        error?.name === "AbortError" ||
-        /abort|SIGTERM/i.test(error?.message ?? ""),
-    );
-  });
-}
-
 async function testCompletedWorkerSettlesWithoutWaitingForProcessExit() {
   await completedWorkerSettlesWithoutWaitingForProcessExit();
   for (const kind of ["discovery", "dedup"] as const) {
@@ -3473,13 +3450,8 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
         ? "COMPLETE_THEN_HANG\n"
         : "COMPLETE_THEN_HANG_IGNORE_TERMINATION\n",
     );
-    execution = new CodexSdkWorkerExecutor({
-      parentSandbox: trustedParentSandbox,
-    }).run({
+    execution = runWorker(promptPath, workingDirectory, {
       kind: kind ?? "discovery",
-      promptPath,
-      workingDirectory,
-      subagents: 0,
       signal: controller.signal,
       ...(resumed ? { resumeThreadId: "fixture-resumed-thread-id" } : {}),
       onThreadStarted: async () => {
@@ -3530,22 +3502,18 @@ async function completedWorkerSettlesWithoutWaitingForProcessExit(
   }
 }
 
-async function testUnstructuredConfigurationFailureRemainsRetryable() {
-  await assert.rejects(
-    runFixtureWorker("CONFIG_ERROR", "setup"),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      error.message.startsWith("Codex Exec exited with code 2:"),
-  );
-}
-
-async function testUnstructuredThreadStartFailureRemainsRetryable() {
-  await assert.rejects(
-    runFixtureWorker("THREAD_START_CONFIG_ERROR", "setup"),
-    (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
-      error?.name === "Error" &&
-      error.message.startsWith("Codex Exec exited with code 1:"),
-  );
+async function testUnstructuredStartupFailuresRemainRetryable() {
+  for (const [prompt, exitCode] of [
+    ["CONFIG_ERROR", 2],
+    ["THREAD_START_CONFIG_ERROR", 1],
+  ] as const) {
+    await assert.rejects(
+      runFixtureWorker(prompt, "setup"),
+      (error: NodeJS.ErrnoException & { cause?: NodeJS.ErrnoException }) =>
+        error?.name === "Error" &&
+        error.message.startsWith(`Codex Exec exited with code ${exitCode}:`),
+    );
+  }
 }
 
 async function testPolicyFailuresAreNonRetryable() {
@@ -3934,15 +3902,13 @@ async function testWorkerCancellation() {
       },
     });
     const run = (controller: AbortController, onThreadStarted?: () => void) =>
-      executor.run({
-        kind: "discovery",
-        promptPath,
-        workingDirectory,
-        subagents: 0,
-        signal: controller.signal,
-        onThreadStarted,
-        artifactContext: { root: workingDirectory, layout: "worker" },
-      });
+      executor.run(
+        workerRequest(promptPath, workingDirectory, {
+          signal: controller.signal,
+          onThreadStarted,
+          artifactContext: { root: workingDirectory, layout: "worker" },
+        }),
+      );
     const preAborted = new AbortController();
     const beforeStartup = new Error(
       "coordinator canceled before worker startup",
@@ -4090,15 +4056,13 @@ async function testWorkerTerminalEvents() {
   try {
     const promptPath = path.join(fixture.root, "prompt.md");
     const quotaMessage = "Quota exceeded. Check your plan and billing details.";
-    const refusalMessage =
-      "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
     for (const event of [
       undefined,
       { type: "turn.failed", error: { message: quotaMessage } },
-      { type: "turn.failed", error: { message: refusalMessage } },
+      { type: "turn.failed", error: { message: cybersecurityRefusal } },
       { type: "turn.failed", error: { message: "429 Too Many Requests" } },
       { type: "error", message: quotaMessage },
-      { type: "error", message: refusalMessage },
+      { type: "error", message: cybersecurityRefusal },
       {
         type: "item.completed",
         item: { id: "quota-text", type: "agent_message", text: quotaMessage },
@@ -4108,7 +4072,7 @@ async function testWorkerTerminalEvents() {
         item: {
           id: "refusal-text",
           type: "agent_message",
-          text: refusalMessage,
+          text: cybersecurityRefusal,
         },
       },
     ] as const) {
@@ -4121,15 +4085,9 @@ async function testWorkerTerminalEvents() {
       for (const kind of ["setup", "discovery", "dedup"] as const) {
         for (const resumeThreadId of [undefined, "fixture-resumed-thread"]) {
           const onNonRetryableError = mock.fn();
-          const execution = new CodexSdkWorkerExecutor({
-            parentSandbox: trustedParentSandbox,
-          }).run({
+          const execution = runWorker(promptPath, fixture.root, {
             kind,
-            promptPath,
-            workingDirectory: fixture.root,
-            subagents: 0,
             resumeThreadId,
-            signal: new AbortController().signal,
             onNonRetryableError,
           });
           if (event?.type === "turn.failed") {
