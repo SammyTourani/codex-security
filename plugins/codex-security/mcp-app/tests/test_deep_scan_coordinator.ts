@@ -4138,8 +4138,8 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
         if (request.kind === "discovery") discoveryCalls++;
         if (request.kind === kind && (kind === "dedup" || discoveryCalls > 1)) {
           attempts.push(request.resumeThreadId);
+          await request.onThreadStarted?.("fixture-refused-thread");
           if (resumed && attempts.length === 1) {
-            await request.onThreadStarted?.("fixture-refused-thread");
             throw new Error("Synthetic transient failure before refusal.");
           }
           const error = codexWorkerTurnError(message);
@@ -4147,6 +4147,7 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
             request.onNonRetryableError?.(error);
           notified.resolve();
           await shutdown.promise;
+          if (resumed) throw new Error("Synthetic worker cleanup failure.");
           throw error;
         }
         return normal.run(request);
@@ -4166,6 +4167,23 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
     const result = await terminal;
     assert.equal(result?.status, "failed");
     assert.equal(result?.error, message);
+    const failed = [...store.workers.values()].filter(
+      (worker) => worker.status === "failed",
+    );
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].kind, kind);
+    assert.equal(failed[0].threadId, "fixture-refused-thread");
+    assert.equal(failed[0].error, message);
+    assert.equal(failed[0].attempt, resumed ? 2 : 1);
+    assert.equal(
+      [...store.workers.values()].every(
+        (worker) =>
+          worker.id === failed[0].id ||
+          worker.status === "canceled" ||
+          worker.status === "succeeded",
+      ),
+      true,
+    );
     assert.equal(signals.length, callsAtFailure);
     assert.deepEqual(sleeps, resumed ? [1] : []);
     assert.deepEqual(

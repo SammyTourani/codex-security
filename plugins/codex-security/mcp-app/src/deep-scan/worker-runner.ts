@@ -369,6 +369,7 @@ export class DeepScanWorkerRunner {
       let validationStarted = false;
       let validationCompleted = false;
       let activeThreadId = resumableThreadId;
+      let nonRetryableError: Error | undefined;
       const baseMutation: DeepScanWorkerMutation = {
         id: input.workerId,
         scanId: run.scanId,
@@ -399,7 +400,10 @@ export class DeepScanWorkerRunner {
               : join(run.scanDir, "artifacts"),
           subagents: input.subagents,
           signal,
-          onNonRetryableError: this.options.onNonRetryableError,
+          onNonRetryableError: (error) => {
+            if (!signal.aborted) nonRetryableError = error;
+            this.options.onNonRetryableError?.(error);
+          },
           resumeThreadId: resumableThreadId,
           continuationPrompt: resumableThreadId
             ? (continuationPrompt ??
@@ -450,10 +454,10 @@ export class DeepScanWorkerRunner {
         };
       } catch (error) {
         if (confirmedOwnershipChange(error, run.scanId)) throw error;
-        if (signal.aborted) {
+        if (signal.aborted && !nonRetryableError) {
           return await this.cancelAttempt(input, attempt, activeThreadId);
         }
-        const normalized = asError(error);
+        const normalized = nonRetryableError ?? asError(error);
         const retryable = !(normalized instanceof DeepScanNonRetryableError);
         if (!retryable || attempt === maximumAttempts) {
           const replaceableFailureKind =
@@ -464,6 +468,7 @@ export class DeepScanWorkerRunner {
               : undefined;
           const persistedFailure = await this.options.store.updateWorker({
             ...baseMutation,
+            threadId: activeThreadId,
             status: replaceableFailureKind ? "canceled" : "failed",
             error: boundedDeepScanErrorMessage(
               replaceableFailureKind
