@@ -4112,6 +4112,7 @@ async function testNonRetryableReducerAbortsScanWithoutRetry(
 async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
   kind: "discovery" | "dedup",
   message: string,
+  resumed: boolean,
 ) {
   const { fixture, store } = await coordinatorFixture({
     workers: 2,
@@ -4126,6 +4127,7 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
   const shutdown = Promise.withResolvers<void>();
   const signals: AbortSignal[] = [];
   const sleeps: number[] = [];
+  const attempts: (string | undefined)[] = [];
   let discoveryCalls = 0;
   const terminal = runCoordinator(
     fixture,
@@ -4134,10 +4136,12 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
       async run(request) {
         signals.push(request.signal);
         if (request.kind === "discovery") discoveryCalls++;
-        if (
-          request.kind === kind &&
-          (kind === "dedup" || discoveryCalls === 2)
-        ) {
+        if (request.kind === kind && (kind === "dedup" || discoveryCalls > 1)) {
+          attempts.push(request.resumeThreadId);
+          if (resumed && attempts.length === 1) {
+            await request.onThreadStarted?.("fixture-refused-thread");
+            throw new Error("Synthetic transient failure before refusal.");
+          }
           const error = codexWorkerTurnError(message);
           if (error instanceof DeepScanNonRetryableError)
             request.onNonRetryableError?.(error);
@@ -4148,7 +4152,11 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
         return normal.run(request);
       },
     },
-    { clock: recordingClock(sleeps) },
+    {
+      clock: recordingClock(sleeps),
+      retryDelaysMs: [1, 3],
+      random: () => 0,
+    },
   );
   try {
     await notified.promise;
@@ -4159,7 +4167,11 @@ async function testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
     assert.equal(result?.status, "failed");
     assert.equal(result?.error, message);
     assert.equal(signals.length, callsAtFailure);
-    assert.deepEqual(sleeps, []);
+    assert.deepEqual(sleeps, resumed ? [1] : []);
+    assert.deepEqual(
+      attempts,
+      resumed ? [undefined, "fixture-refused-thread"] : [undefined],
+    );
   } finally {
     shutdown.resolve();
     await terminal;
@@ -4179,14 +4191,15 @@ try {
     "Quota exceeded. Check your plan and billing details.",
     "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
   ]) {
-    await testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
-      "discovery",
-      message,
-    );
-    await testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
-      "dedup",
-      message,
-    );
+    for (const kind of ["discovery", "dedup"] as const) {
+      for (const resumed of [false, true]) {
+        await testNonRetryableTurnStopsDispatchBeforeWorkerShutdown(
+          kind,
+          message,
+          resumed,
+        );
+      }
+    }
   }
   await testCappedQueueAndSerialDedup();
   await testStandardWorkersReceiveExistingFalsePositiveFeedback();

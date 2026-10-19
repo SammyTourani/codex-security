@@ -7,9 +7,9 @@ const STALE_COORDINATOR_GENERATION_MESSAGE =
   "Deep Scan coordinator lease belongs to a newer generation.";
 
 // The SDK currently exposes only the message for turn errors. Match known
-// refusal messages exactly so repository output embedded in another error
-// cannot be mistaken for a refusal.
-const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
+// terminal messages exactly so repository output embedded in another error
+// cannot be mistaken for a permanent failure.
+const NON_RETRYABLE_TURN_MESSAGES = new Set([
   "Request blocked by cyberPolicy.",
   "Request blocked by a safety policy violation.",
   "This content was flagged for possible cybersecurity risk.",
@@ -17,6 +17,11 @@ const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
   "This content was flagged for potentially high-risk cyber activity.",
   "This request has been flagged for possible cybersecurity risk.",
   "This request has been flagged for potentially high-risk cyber activity.",
+  "Quota exceeded. Check your plan and billing details.",
+  "Your workspace is out of credits. Add credits to continue.",
+  "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
+  "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
+  "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
 ]);
 
 /** A confirmed terminal worker failure that stops the scan without retries. */
@@ -27,19 +32,10 @@ export class DeepScanNonRetryableError extends Error {
   }
 }
 
-const USAGE_LIMIT_MESSAGES = new Set([
-  "Quota exceeded. Check your plan and billing details.",
-  "Your workspace is out of credits. Add credits to continue.",
-  "Your workspace is out of credits. Ask your workspace owner to refill in order to continue.",
-  "You hit your spend cap set in your workspace. Increase your spend cap to continue.",
-  "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.",
-]);
-
 // Classify only terminal turn failures; diagnostics can contain arbitrary output.
 export function codexWorkerTurnError(message: string): Error {
   if (
-    CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message) ||
-    USAGE_LIMIT_MESSAGES.has(message) ||
+    NON_RETRYABLE_TURN_MESSAGES.has(message) ||
     message.startsWith("You’ve hit your usage limit.") ||
     message.startsWith("You’ve hit your usage limit for ")
   ) {
